@@ -3,7 +3,10 @@
 // It scales to zero and answers 303 during a ~2min cold start, so every call is
 // best-effort — the deterministic layer in drift.js always carries the reveal.
 
-const MODEL = 'usher'
+// The model slug the endpoint expects. The Modal deployment serves one model under the
+// name 'usher'; any other OpenAI-compatible host (OpenRouter, together, a local vLLM)
+// needs its own slug, so this is configurable.
+const MODEL = env => env.USHER_MODEL || 'usher'
 
 export async function warmUsher(env) {
   try { await fetch(env.USHER_BASE.replace(/\/v1$/, '') + '/health') } catch {}
@@ -18,13 +21,17 @@ async function warm(env) {
 
 export async function ushChat(env, messages, { maxTokens = 700, temperature = 0.1, retries = 8 } = {}) {
   if (!env.USHER_KEY) return null
+  // Not every OpenAI-compatible provider accepts response_format. Ask for it, and drop it
+  // for the rest of this call if the endpoint objects — looseJson already copes with a
+  // model that fences or chats around its JSON, so this only costs strictness.
+  let jsonMode = true
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(env.USHER_BASE + '/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.USHER_KEY}` },
-        body: JSON.stringify({ model: MODEL, messages, max_tokens: maxTokens, temperature,
-          response_format: { type: 'json_object' } }),
+        body: JSON.stringify({ model: MODEL(env), messages, max_tokens: maxTokens, temperature,
+          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
       })
       // 303 == container cold-starting. Poke /health and back off.
       if (res.status === 303 || res.status === 503 || res.status === 429) {
@@ -33,6 +40,10 @@ export async function ushChat(env, messages, { maxTokens = 700, temperature = 0.
         continue
       }
       const body = await res.text()
+      if (!res.ok && jsonMode && /response_format|json_object|json mode/i.test(body)) {
+        jsonMode = false
+        continue   // same attempt's worth of work, without the unsupported field
+      }
       if (!res.ok || /Missing request|expiry or cancellation/i.test(body)) {
         await new Promise(r => setTimeout(r, 900 * (attempt + 1)))
         continue
