@@ -4,8 +4,16 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const LS = { get: k => { try { return localStorage.getItem(k) } catch { return null } },
              set: (k, v) => { try { localStorage.setItem(k, v) } catch {} } }
 
-let ws = null, S = null, myId = LS.get('tel.pid') || '', myName = LS.get('tel.name') || '', room = ''
+let ws = null, S = null, myName = LS.get('tel.name') || '', room = ''
 let generating = false
+
+// A seat is (id, token) and belongs to one room. The token is what proves the seat is
+// yours — ids are broadcast to everyone so the roster can render, so an id alone must not
+// be enough to claim a chair and be handed someone else's message.
+let seat = { id: '', token: '' }
+const seatKey = () => 'tel.seat.' + room
+function loadSeat() { try { seat = JSON.parse(LS.get(seatKey())) || { id: '', token: '' } } catch { seat = { id: '', token: '' } } }
+function saveSeat() { LS.set(seatKey(), JSON.stringify(seat)) }
 
 function toast(m) {
   const d = document.createElement('div'); d.className = 'toast'; d.textContent = m
@@ -19,27 +27,54 @@ function roomFromUrl() { return (location.hash.match(/^#\/r\/([A-Z0-9]{3,8})/i) 
 async function boot() {
   room = roomFromUrl()
   if (!room) return renderHome()
+  loadSeat()
   if (!myName) return renderNameGate()
   connect()
 }
 window.addEventListener('hashchange', () => location.reload())
 
+let retries = 0, reconnectTimer = null
+function setLink(state) {
+  const el = $('#link')
+  if (el) { el.className = 'link ' + state; el.title = state }
+}
+
 function connect() {
+  clearTimeout(reconnectTimer)
   $('#codebox').classList.remove('hide'); $('#code').textContent = room
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new WebSocket(`${proto}://${location.host}/ws/${room}`)
-  ws.onopen = () => send({ t: 'join', name: myName, playerId: myId })
+
+  ws.onopen = () => {
+    retries = 0; setLink('ok')
+    document.querySelector('.warn')?.remove()
+    send({ t: 'join', name: myName, playerId: seat.id, token: seat.token })
+  }
   ws.onmessage = e => {
     const m = JSON.parse(e.data)
-    if (m.t === 'you') { myId = m.playerId; LS.set('tel.pid', myId) }
+    if (m.t === 'you') { seat = { id: m.playerId, token: m.token || '' }; saveSeat() }
     if (m.t === 'state') { S = m.v; render() }
     if (m.t === 'err') toast(m.m)
     if (m.t === 'genstart') { generating = true; render() }
     if (m.t === 'genend') { generating = false; if (!m.ok) toast('Model is warming up — write one yourself.'); render() }
   }
-  ws.onclose = () => { view.insertAdjacentHTML('afterbegin',
-    '<div class="warn">Disconnected. <a href="" style="color:#ffd166">Reload</a></div>') }
+  // Phones drop the socket whenever the tab backgrounds. Reconnecting silently matters more
+  // here than almost anywhere: the chain stalls on whoever is holding the message.
+  ws.onclose = () => {
+    setLink('off')
+    const wait = Math.min(15000, 600 * Math.pow(1.7, retries++))
+    if (retries > 1 && !document.querySelector('.warn')) {
+      view.insertAdjacentHTML('afterbegin',
+        '<div class="warn" id="warn">Reconnecting… <a href="" style="color:#ffd166">reload</a></div>')
+    }
+    reconnectTimer = setTimeout(connect, wait)
+  }
+  ws.onerror = () => { try { ws.close() } catch {} }
 }
+// Come back the moment the user does, rather than waiting out the backoff.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && ws && ws.readyState > 1) { retries = 0; connect() }
+})
 
 // ---------- screens ----------
 function renderHome() {
@@ -138,6 +173,18 @@ function renderLobby() {
       <button class="ghost tiny" data-bot="assimilator">The Rationalizer · assimilates</button>
       <button class="ghost tiny" data-bot="faithful">The Careful One · control</button>
     </div></div>` : ''}
+  ${host ? `<div class="panel" style="margin-top:16px">
+    <h3>How long they get to look</h3>
+    <p class="lede" style="font-size:15px;margin:0 0 16px;max-width:52ch">The message is taken away
+    before they write. Recall is the whole experiment — leave people looking at it and you measure
+    paraphrasing, not memory.</p>
+    <div class="row">
+      ${[['Auto', ''], ['5s', 5000], ['10s', 10000], ['No limit', 0]].map(([lab, ms]) =>
+        `<button class="ghost tiny ${(ms === '' ? S.exposeMs == null : S.exposeMs === ms) ? 'on' : ''}"
+          data-exp="${ms}">${lab}</button>`).join('')}
+    </div>
+    <p class="lab" style="margin-top:12px">Auto scales with the message: 4–15 seconds.</p>
+  </div>` : ''}
   ${host ? `<div class="panel">
     <h2 style="margin-top:0">The starting message</h2>
     <p class="sub" style="margin-bottom:11px">Only you can see this. Make it specific — names, numbers,
@@ -156,10 +203,12 @@ function renderLobby() {
   $('#rename')?.addEventListener('click', e => {
     e.preventDefault()
     const n = prompt('Your name', myName)
-    if (n && n.trim()) { myName = n.trim(); LS.set('tel.name', myName); send({ t: 'join', name: myName, playerId: myId }) }
+    if (n && n.trim()) { myName = n.trim(); LS.set('tel.name', myName); send({ t: 'join', name: myName, playerId: seat.id, token: seat.token }) }
   })
   document.querySelectorAll('[data-bot]').forEach(b =>
     b.addEventListener('click', () => send({ t: 'addbot', persona: b.dataset.bot })))
+  document.querySelectorAll('[data-exp]').forEach(b =>
+    b.addEventListener('click', () => send({ t: 'expose', ms: b.dataset.exp === '' ? null : Number(b.dataset.exp) })))
   $('#cp')?.addEventListener('click', () => {
     navigator.clipboard?.writeText(location.href).then(() => toast('Link copied')).catch(() => {})
   })
@@ -172,35 +221,155 @@ function renderLobby() {
   }
 }
 
-function renderRunning() {
-  const mine = S.handed !== null && S.handed !== undefined
-  if (mine) {
+// ---------- the turn ----------
+// The message is shown for a few seconds and then taken away. Without that this is serial
+// transcription, not serial reproduction: what drifts is whatever you chose to paraphrase,
+// not what your memory actually did to it.
+
+let draft = ''            // survives re-renders; the server echoes state at awkward moments
+let typeStart = 0, pasted = false
+let shownKey = null, hiddenKey = null, hideTimer = null, tickTimer = null
+
+function resetTurn() {
+  clearTimeout(hideTimer); clearInterval(tickTimer)
+  hideTimer = tickTimer = null; shownKey = hiddenKey = null
+  draft = ''; typeStart = 0; pasted = false
+}
+
+function hostControls() {
+  if (!S.isHost) return ''
+  return `<div class="hostbar">
+    <button class="ghost tiny" id="skip">Skip ${esc(S.holder?.name || '')}</button>
+    ${S.reading ? '<button class="ghost tiny" id="reshow">Let them look again</button>' : ''}
+    ${S.passed ? '<button class="ghost tiny" id="undo">Undo last turn</button>' : ''}
+  </div>`
+}
+function wireHostControls() {
+  $('#skip')?.addEventListener('click', () => send({ t: 'skip' }))
+  $('#reshow')?.addEventListener('click', () => send({ t: 'reshow' }))
+  $('#undo')?.addEventListener('click', () => {
+    if (confirm('Roll back the last turn? They will be handed the message again.')) send({ t: 'undo' })
+  })
+}
+
+// Turn the composer on once the message is gone. Locking it while the message is up is the
+// actual enforcement — given a textarea and the text side by side, people transcribe.
+function openComposer() {
+  hiddenKey = shownKey
+  const out = $('#out'), pass = $('#pass'), gone = $('#gone')
+  if (!out) return
+  $('#msg')?.remove()          // out of the DOM, not just hidden
+  gone?.classList.remove('hide')
+  out.disabled = false; pass.disabled = false
+  out.placeholder = 'What did it say?'
+  out.value = draft
+  out.focus()
+}
+
+function startCountdown(ms) {
+  const ring = $('#ctd'), num = $('#ctdn')
+  if (!ring) return
+  const end = Date.now() + ms
+  const C = 2 * Math.PI * 15
+  ring.style.strokeDasharray = C
+  ring.style.strokeDashoffset = 0
+  requestAnimationFrame(() => {
+    ring.style.transition = `stroke-dashoffset ${ms}ms linear`
+    ring.style.strokeDashoffset = C
+  })
+  tickTimer = setInterval(() => {
+    const left = Math.max(0, end - Date.now())
+    if (num) num.textContent = Math.ceil(left / 1000)
+    if (!left) clearInterval(tickTimer)
+  }, 100)
+  hideTimer = setTimeout(() => { clearInterval(tickTimer); openComposer() }, ms)
+}
+
+function renderMyTurn() {
+  const ex = S.exposure
+  const key = ex ? `${S.turn}:${ex.shownAt}` : null
+  // Once this window has closed locally it stays closed. The server's grace period keeps
+  // `live` true for a moment longer so a reconnect works, and a state broadcast landing in
+  // that gap would otherwise put the message back on screen — a free second look.
+  const showing = !!(S.handed && ex?.live && key !== hiddenKey)
+  const noLimit = S.exposeMs === 0
+
+  // Not shown yet: gate behind a tap so the clock cannot burn down while they are still
+  // reading the last screen.
+  if (!ex) {
+    resetTurn()
     view.innerHTML = `<div class="panel st">
-      <h2 style="margin-top:0">${S.isFirst ? 'You start the chain' : 'Handed to you'}</h2>
-      <div class="handed"><div class="quote">${esc(S.handed)}</div></div>
-      <p class="lede" style="margin-top:13px;font-size:15px">Read it, then pass it on <b>in your own words</b>.
-      You can look at it while you write — most people won't remember it exactly, and that's the point.</p>
-      <textarea id="out" rows="3" placeholder="Pass it on…" style="margin-top:9px"></textarea>
-      <div style="height:11px"></div>
-      <button class="wide" id="pass">Pass to ${esc(S.players[S.turn + 1]?.name || 'the group')} →</button>
+      <h2 style="margin-top:0">${S.isFirst ? 'You start the chain' : 'It’s your turn'}</h2>
+      <p class="big">${S.isFirst ? 'You’ll see the starting message' : 'You’ll see the message'}
+        ${noLimit ? '' : ' for <b>a few seconds only</b>'}, then it disappears and you retell it
+        ${noLimit ? '' : '<b>from memory</b>'}.</p>
+      <p class="sub">Don’t tap until you’re ready to read.</p>
+      <div style="height:16px"></div>
+      <button class="wide" id="show">Show me the message</button>
     </div>`
-    $('#out').focus()
-    $('#pass').onclick = () => {
-      const v = $('#out').value.trim(); if (!v) return toast('Write something first.')
-      $('#pass').disabled = true; send({ t: 'pass', text: v })
-    }
-  } else {
-    view.innerHTML = `<div class="panel st">
-      <h2 style="margin-top:0">In flight</h2>
-      <p class="big">The message is with <b style="color:var(--accent)">${esc(S.holder?.name || '…')}</b>.</p>
-      <p class="sub">Nobody else can see it — not even this screen. That's what makes the reveal honest.</p>
-      ${playerList(true)}
-      <p class="lab" style="margin-top:16px">${S.turn} of ${S.total} have passed it on</p>
-      ${S.isHost ? `<div style="margin-top:18px"><button class="ghost tiny" id="skip">
-        Skip ${esc(S.holder?.name || '')} — they dropped off</button></div>` : ''}
-    </div>`
-    $('#skip')?.addEventListener('click', () => send({ t: 'skip' }))
+    $('#show').onclick = () => { $('#show').disabled = true; send({ t: 'ready' }) }
+    return
   }
+
+  view.innerHTML = `<div class="panel st">
+    <h2 style="margin-top:0">${S.isFirst ? 'You start the chain' : 'Handed to you'}</h2>
+    ${showing ? `<div id="msg">
+      ${noLimit ? '' : `<div class="ctdwrap"><svg width="36" height="36" viewBox="0 0 36 36">
+        <circle cx="18" cy="18" r="15" fill="none" stroke="var(--rule2)" stroke-width="3"/>
+        <circle id="ctd" cx="18" cy="18" r="15" fill="none" stroke="var(--sharp)" stroke-width="3"
+          stroke-linecap="round" transform="rotate(-90 18 18)"/></svg>
+        <span class="ctdn" id="ctdn"></span><span class="lab">memorise it</span></div>`}
+      <div class="handed"><div class="quote">${esc(S.handed)}</div></div></div>` : ''}
+    <div id="gone" class="${showing ? 'hide' : ''}">
+      <div class="lede" style="margin:0 0 4px">${noLimit ? 'Retell it in your own words.' : 'It’s gone. Retell it from memory, in your own words.'}</div>
+      <p class="sub" style="margin:0 0 12px">Whatever you remember is the right answer — the gaps are the experiment.</p>
+    </div>
+    <textarea id="out" rows="3" placeholder="${showing ? 'Read it first…' : 'What did it say?'}"
+      ${showing ? 'disabled' : ''}></textarea>
+    <div style="height:11px"></div>
+    <button class="wide" id="pass" ${showing ? 'disabled' : ''}>Pass to ${esc(S.players[S.turn + 1]?.name || 'the group')} →</button>
+  </div>`
+
+  const out = $('#out')
+  out.value = draft
+  out.addEventListener('input', () => { draft = out.value; if (!typeStart) typeStart = Date.now() })
+  // Blocking paste doesn't stop a determined player, but it does stop the lazy path, and
+  // the flag is recorded either way so the reveal can discount the hop.
+  const nope = e => { e.preventDefault(); pasted = true; toast('Paste is off — write what you remember.') }
+  out.addEventListener('paste', nope)
+  out.addEventListener('drop', nope)
+
+  $('#pass').onclick = () => {
+    const v = out.value.trim(); if (!v) return toast('Write something first.')
+    $('#pass').disabled = true
+    send({ t: 'pass', text: v, typedMs: typeStart ? Date.now() - typeStart : null, pasted })
+    resetTurn()
+  }
+
+  if (showing && !noLimit && key !== shownKey) {
+    shownKey = key
+    // Clamp against clock skew between the phone and the edge: never longer than the window.
+    const left = Math.max(600, Math.min(ex.ms, ex.shownAt + ex.ms - Date.now()))
+    startCountdown(left)
+  } else if (!showing) {
+    out.focus()
+  }
+}
+
+function renderRunning() {
+  const myTurn = S.holder && S.you && S.holder.id === S.you.id
+  if (myTurn) return renderMyTurn()
+  resetTurn()
+  view.innerHTML = `<div class="panel st">
+    <h2 style="margin-top:0">In flight</h2>
+    <p class="big">The message is with <b style="color:var(--accent)">${esc(S.holder?.name || '…')}</b>${
+      S.reading ? ', reading it now' : ''}.</p>
+    <p class="sub">Nobody else can see it — not even this screen. That's what makes the reveal honest.</p>
+    ${playerList(true)}
+    <p class="lab" style="margin-top:16px">${S.turn} of ${S.total} have passed it on</p>
+    ${hostControls()}
+  </div>`
+  wireHostControls()
 }
 
 // ---------- alluvial proposition flow ----------
@@ -219,9 +388,18 @@ function ribbonPath(x0, y0, t0, x1, y1, t1) {
 function alluvial(flow) {
   if (!flow?.props?.length) return ''
   const props = flow.props, cols = flow.cols
-  const N = cols.length + 1, W = 130 * N + 150, PAD = 74
-  const lane = 34, H = PAD + props.length * lane + 46
-  const xs = i => 110 + i * ((W - 190) / Math.max(1, N - 1))
+  // Claim labels sit in a left gutter. It has to be wide enough for the truncated text or
+  // the labels run off the viewBox and get clipped.
+  const LEFT = 176, RIGHT = 74, LANE = 34, PAD = 74
+  const N = cols.length + 1
+  const W = LEFT + 140 * Math.max(1, N - 1) + RIGHT
+  const xs = i => LEFT + i * ((W - LEFT - RIGHT) / Math.max(1, N - 1))
+  // Every invented claim gets its own row across the whole diagram; stacking them per
+  // column put two ribbons and two labels on the same y.
+  const bornItems = cols.flatMap((c, ci) => (c.invented || []).slice(0, 2).map(text => ({ text, ci })))
+    .slice(0, 6)
+  const H = PAD + props.length * LANE + (bornItems.length ? 18 + bornItems.length * 26 : 0) + 34
+  const lane = LANE
 
   let paths = '', dots = '', dead = ''
   props.forEach((p, pi) => {
@@ -253,23 +431,25 @@ function alluvial(flow) {
     }
   })
 
-  // invented claims: born at the column where they appear
-  let born = ''
-  cols.forEach((c, ci) => {
-    (c.invented || []).slice(0, 2).forEach((iv, k) => {
-      const y = PAD + props.length * lane + 6 + k * 20
-      const x0 = xs(ci + 1), x1 = xs(cols.length)
-      born += `<path d="${ribbonPath(x0, y, 1.5, Math.max(x1, x0 + 40), y, 9)}"
-        fill="hsl(352 72% 58% / .5)" class="rb" style="--d:${700 + ci * 90}ms"/>
-        <text x="${x0 + 8}" y="${y - 8}" class="flab" fill="#e05a6d">${esc(iv).slice(0, 34)}</text>`
-    })
-  })
+  // invented claims: born at the column where they appear, one per row
+  const bornTop = PAD + props.length * lane + 18
+  const born = bornItems.map((it, k) => {
+    const y = bornTop + k * 26
+    // Ends at the final column, not the edge of the viewBox.
+    const x0 = xs(it.ci + 1), x1 = Math.max(xs(N - 1), x0 + 40)
+    return `<path d="${ribbonPath(x0, y, 1.5, x1, y, 9)}"
+      fill="hsl(352 72% 58% / .5)" class="rb" style="--d:${700 + it.ci * 90}ms"/>
+      <text x="${x0 + 8}" y="${y - 9}" class="flab" fill="#e05a6d">${esc(it.text).slice(0, 30)}</text>`
+  }).join('')
 
-  const heads = [`<text x="110" y="34" class="fnode" text-anchor="middle">ORIGINAL</text>`,
+  const heads = [`<text x="${LEFT}" y="34" class="fnode" text-anchor="middle">ORIGINAL</text>`,
     ...cols.map((c, i) => `<text x="${xs(i + 1)}" y="34" class="fnode" text-anchor="middle">${esc(c.author).slice(0,12).toUpperCase()}</text>` +
       (c.ai ? `<text x="${xs(i + 1)}" y="48" class="fnode" fill="#7d776c" text-anchor="middle">AI</text>` : ''))].join('')
-  const labels = props.map((p, pi) => `<text x="100" y="${PAD + pi * lane + 4}" class="flab"
-    text-anchor="end">${esc(p.text).slice(0, 26)}</text>`).join('')
+  const labels = props.map((p, pi) => {
+    const t = p.text.length > 24 ? p.text.slice(0, 23) + '…' : p.text
+    return `<text x="${LEFT - 14}" y="${PAD + pi * lane + 4}" class="flab"
+      text-anchor="end">${esc(t)}</text>`
+  }).join('')
 
   return `<div class="flowwrap"><svg class="flow" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
     <style>.rb{opacity:0;animation:rin .8s var(--e1) forwards;animation-delay:var(--d)}
@@ -299,22 +479,33 @@ function ring(pct) {
     <div class="fidcap">survived intact</div>`
 }
 
-function sparkline(curve) {
+function sparkline(curve, breaks = []) {
   const W = 100, H = 42, n = curve.length
-  const pts = curve.map((c, i) => [(i / Math.max(1, n - 1)) * W, H - (c.fidelity / 100) * H])
-  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
+  const x = i => (i / Math.max(1, n - 1)) * W
+  const line = key => curve.map((c, i) =>
+    `${i ? 'L' : 'M'}${x(i).toFixed(1)},${(H - (c[key] / 100) * H).toFixed(1)}`).join(' ')
+  const pts = curve.map((c, i) => [x(i), H - (c.fidelity / 100) * H])
+  const d = line('fidelity')
   const area = `${d} L${W},${H} L0,${H} Z`
+  const cut = breaks.map(b => `<line x1="${x(b.index).toFixed(1)}" y1="0" x2="${x(b.index).toFixed(1)}" y2="${H}"
+    stroke="#e05a6d" stroke-width="1" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" opacity=".8"/>`).join('')
   return `<div class="curve"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:110px">
     <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffd166" stop-opacity=".32"/><stop offset="1" stop-color="#ffd166" stop-opacity="0"/>
     </linearGradient></defs>
-    <path d="${area}" fill="url(#g)"/><path d="${d}" fill="none" stroke="#ffd166" stroke-width="1.6"
+    <path d="${area}" fill="url(#g)"/>${cut}
+    ${breaks.length ? `<path d="${line('segFidelity')}" fill="none" stroke="#4bbf8a" stroke-width="1.4"
+      stroke-dasharray="3 2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>` : ''}
+    <path d="${d}" fill="none" stroke="#ffd166" stroke-width="1.6"
       vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
     ${pts.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="1.9" fill="#08090d"
       stroke="#ffd166" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`).join('')}
   </svg>
   <div style="display:flex;justify-content:space-between;font:600 10px var(--mono);color:var(--dim2);padding:0 2px">
-    ${curve.map((c, i) => `<span>${i === 0 ? 'START' : c.fidelity + '%'}</span>`).join('')}</div></div>`
+    ${curve.map((c, i) => `<span>${i === 0 ? 'START' : c.fidelity + '%'}</span>`).join('')}</div>
+  ${breaks.length ? `<div class="legend"><span class="lgi"><span class="sw" style="background:#ffd166"></span>against the original</span>
+    <span class="lgi"><span class="sw" style="background:#4bbf8a"></span>against the message the chain restarted from</span>
+    <span class="lgi"><span class="sw" style="background:#e05a6d"></span>the chain broke here</span></div>` : ''}</div>`
 }
 
 function diffHtml(diff) {
@@ -351,6 +542,22 @@ function renderReveal() {
   if (!R) return view.innerHTML = `<p class="lede" style="margin-top:var(--s4)"><span class="spin"></span>Analysing the chain…</p>`
   const A = R.analysis, chain = R.chain, N = R.narration
   const orig = chain[0].text, fin = chain[chain.length - 1].text
+  const breaks = A.breaks || []
+
+  // One person going off-script is a real result, not a failed run — so say so plainly, and
+  // report the stretch either side of it rather than one number that hides the whole story.
+  const broke = breaks.length ? `<div class="broke st">
+    <div class="lab" style="margin-bottom:10px">The chain broke</div>
+    <div class="n">${breaks.map(b => esc(b.author)).join(' · ')}</div>
+    <div class="lede" style="margin-top:10px;max-width:52ch">${breaks.length > 1 ? 'These turns' : 'This turn'}
+      bore no recoverable relation to what came in, so everything downstream is a retelling of
+      something else. The ${A.fidelity}% above is measured against the original; against the message
+      the chain actually restarted from, <b style="color:var(--keep)">${A.fidelityRebased}%</b> survived.</div>
+    ${A.segments?.length > 1 ? `<div class="segs">${A.segments.map(s => `<div class="seg">
+      <span class="mono">${esc(chain[s.from].author)} → ${esc(chain[s.to].author)}</span>
+      <span class="sv" style="color:${s.fidelity > 66 ? 'var(--keep)' : s.fidelity > 33 ? 'var(--sharp)' : 'var(--invent)'}">${s.fidelity}%</span>
+      <span class="lab">${s.hops} hop${s.hops === 1 ? '' : 's'}</span></div>`).join('')}</div>` : ''}
+  </div>` : ''
 
   view.innerHTML = `
   <div class="hero st">
@@ -364,13 +571,21 @@ function renderReveal() {
     ${N.why ? `<div class="why">${esc(N.why)}</div>` : ''}</div>`
    : R.narrating ? `<p class="lede" style="margin-top:var(--s4)"><span class="spin"></span>Reading the drift…</p>` : ''}
 
+  ${broke}
+
   ${R.flow ? `<h2>Every claim, and where it died</h2>
     <p class="lede measure" style="margin:0 0 var(--s3)">The original message broken into atomic claims.
     Each ribbon is one claim, tracked hop by hop — narrowing as it weakens, shifting as it distorts,
     fraying where it dies.</p>${alluvial(R.flow)}`
    : R.narrating ? '' : ''}
 
-  <h2>Decay</h2>${sparkline(A.curve)}
+  ${R.flow?.rebase && !R.flow.rebase.pending ? `<h2>And again, from where it restarted</h2>
+    <p class="lede measure" style="margin:0 0 var(--s3)">Everything after ${esc(R.flow.rebase.author)} is
+    a retelling of a different message, so against the original every ribbon above simply dies. These are
+    the claims in <b>${esc(R.flow.rebase.author)}’s</b> version, tracked down the rest of the chain — what
+    the group actually did after the break.</p>${alluvial(R.flow.rebase)}` : ''}
+
+  <h2>Decay</h2>${sparkline(A.curve, A.breaks || [])}
 
   ${A.biggestMutation ? `<div class="blame st">
     <div class="lab" style="margin-bottom:10px">Biggest single mutation</div>
@@ -393,9 +608,13 @@ function renderReveal() {
   <h2>Every version</h2>
   <div style="padding:var(--s3) 0;border-top:1px solid var(--rule)">
     <div class="lab">Original</div><div class="quote" style="margin-top:12px">${esc(orig)}</div></div>
-  ${A.hops.map(h => `<div class="hop">
+  ${A.hops.map(h => `<div class="hop${breaks.some(b => b.index === h.index) ? ' snapped' : ''}">
     <div class="hh"><span class="who">${esc(h.to.author)}</span>
-      ${chain[h.index]?.ai ? `<span class="tag t-${BIAS[chain[h.index].ai]||'faithful'}">AI</span>` : ''}
+      ${chain[h.index]?.ai ? `<span class="tag t-${BIAS[chain[h.index].ai]||'faithful'}">AI · ${BIAS[chain[h.index].ai]||'faithful'}</span>` : ''}
+      ${chain[h.index]?.skipped ? '<span class="tag" style="color:var(--ink2);border-color:var(--rule2)">SKIPPED</span>' : ''}
+      ${breaks.some(b => b.index === h.index) ? '<span class="tag t-invention">BROKE THE CHAIN</span>' : ''}
+      ${h.suspect ? `<span class="tag t-invention" title="Memory mode is enforced in the browser, so this is measured, not certain">${
+        h.suspect === 'pasted' ? 'PASTED' : 'LIKELY COPIED'}</span>` : ''}
       <span class="m">${h.fidelity}% KEPT · DRIFT ${h.severity}</span></div>
     <div class="diff">${diffHtml(h.diff)}</div>
     ${h.ops.length ? `<div class="ops">${h.ops.map(o=>`<div class="op ${o.type}"><b>${TYPE_WORD[o.type]||o.type}</b>${esc(o.label)}</div>`).join('')}</div>`

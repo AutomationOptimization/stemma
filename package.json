@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node --test 'test/*.test.js'",
+    "test:e2e": "node test/integration.mjs"
   },
   "devDependencies": { "wrangler": "^4.128.0" }
 }

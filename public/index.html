@@ -81,7 +81,7 @@ input:focus,textarea:focus{outline:0;border-color:var(--ink2)}
 
 /* alluvial */
 .flowwrap{overflow-x:auto;margin:0 -22px;padding:0 22px}
-.flow{min-width:660px;display:block}
+.flow{min-width:660px;max-width:100%;height:auto;display:block}
 .fnode{font:600 9px var(--ui);text-transform:uppercase;letter-spacing:.13em;fill:var(--ink2)}
 .flab{font:400 12px var(--ui);fill:var(--ink1)}
 .legend{display:flex;gap:var(--s2);flex-wrap:wrap;margin:var(--s2) 0 var(--s3)}
@@ -125,9 +125,37 @@ footer{margin-top:var(--s6);padding-top:var(--s2);border-top:1px solid var(--rul
   font:400 12px var(--ui);color:var(--ink3);letter-spacing:.04em}
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--bg2);
   border:1px solid var(--rule2);color:var(--ink0);padding:13px 20px;border-radius:3px;font-size:14px;z-index:99}
+
+/* Aliases the app already reaches for; without them these fall back to inherited colour. */
+:root{--accent:var(--sharp);--good:var(--keep);--dim:var(--ink1);--dim2:var(--ink2)}
+.big{font:400 clamp(17px,2.3vw,20px)/1.55 var(--disp);color:var(--ink0);letter-spacing:-.008em;margin:0}
+.sub{font:400 15px/1.6 var(--ui);color:var(--ink2);margin:8px 0 0}
+.warn{background:color-mix(in srgb,var(--sharp) 12%,var(--bg1));border:1px solid
+  color-mix(in srgb,var(--sharp) 34%,transparent);color:var(--ink0);padding:12px 16px;border-radius:3px;
+  font:500 14px var(--ui);margin-bottom:var(--s2)}
+.curve{margin-bottom:var(--s3)}
+.trace .ar{color:var(--ink3)}
+button.ghost.on{border-color:var(--ink1);color:var(--ink0);background:var(--bg2)}
+.hostbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:16px;border-top:1px solid var(--rule)}
+.hostbar>*{flex:0 0 auto}
+
+/* memory window */
+.ctdwrap{display:flex;align-items:center;gap:11px;margin-bottom:var(--s2)}
+.ctdn{font:600 15px var(--mono);color:var(--sharp);min-width:2ch}
+#msg .handed{border-left-color:var(--sharp)}
+textarea:disabled{opacity:.4;cursor:not-allowed}
+
+/* a snapped chain */
+.broke{padding-left:var(--s3);border-left:2px solid var(--invent);margin:var(--s4) 0}
+.broke .n{font:800 clamp(24px,4.4vw,34px)/1.05 var(--disp);letter-spacing:-.03em;color:var(--invent)}
+.segs{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:20px}
+.seg{display:flex;align-items:baseline;gap:10px;padding:11px 15px;background:var(--bg1);
+  border:1px solid var(--rule);border-radius:3px}
+.seg .sv{font:700 17px var(--disp)}
+.hop.snapped{border-top:1px solid color-mix(in srgb,var(--invent) 45%,transparent)}
 </style></head><body><div class="wrap">
 <header><div><h1>Telephone</h1><p class="lede measure" id="tag">The anatomy of a rumour.</p></div>
 <div id="codebox" class="hide"><div class="code" id="code">····</div></div></header>
 <div id="view"></div>
 <footer>Serial reproduction after Bartlett (1932) · leveling · sharpening · assimilation · invention</footer>
-</div><script type="module" src="/app.js?v=9"></script></body></html>
+</div><script type="module" src="/app.js?v=13"></script></body></html>
