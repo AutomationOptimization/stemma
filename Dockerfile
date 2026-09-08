@@ -3,9 +3,12 @@ FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Only the runtime dep (ws) — wrangler is a devDependency and is not needed to serve.
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable && pnpm install --prod --frozen-lockfile
+# `ws` is the only runtime dependency — wrangler and miniflare are devDependencies used
+# for the Cloudflare target and are not installed here. The version is pinned in
+# package.json, so this needs no lockfile (and pnpm's release-age policy, which rejects
+# a same-day wrangler, never applies to the image).
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
 COPY src ./src
 COPY server ./server
