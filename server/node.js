@@ -19,9 +19,13 @@ import { Room } from '../src/worker.js'
 
 const PORT = Number(process.env.PORT) || 8080
 const PUBLIC = fileURLToPath(new URL('../public/', import.meta.url))
+// Pass every USHER_* variable through rather than naming them one by one. Listing them
+// individually already cost one silent outage: USHER_MODEL was missing here, so usher.js
+// fell back to the default slug and every model call 400'd into the retry loop.
 const env = {
-  USHER_BASE: process.env.USHER_BASE || 'https://kalebautomates--usher-usher-serve.modal.run/v1',
-  USHER_KEY: process.env.USHER_KEY || '',
+  USHER_BASE: 'https://kalebautomates--usher-usher-serve.modal.run/v1',
+  USHER_KEY: '',
+  ...Object.fromEntries(Object.entries(process.env).filter(([k, v]) => k.startsWith('USHER_') && v)),
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' // no I/L/O/0/1
@@ -121,9 +125,17 @@ const server = createServer(async (req, res) => {
   }
 
   if (p === '/api/health') {
+    // The /health probe only means anything on the Modal deployment; a generic
+    // OpenAI-compatible host has no such route, so report the config too rather than
+    // leaving "cold" as the single ambiguous signal.
     const r = await fetch(env.USHER_BASE.replace(/\/v1$/, '') + '/health').catch(() => null)
-    return json(res, { worker: 'ok', rooms: rooms.size, key: env.USHER_KEY ? 'set' : 'missing',
-      model: r && r.ok ? await r.json().catch(() => null) : 'cold' })
+    return json(res, {
+      worker: 'ok', rooms: rooms.size,
+      key: env.USHER_KEY ? 'set' : 'missing',
+      base: env.USHER_BASE,
+      modelSlug: env.USHER_MODEL || 'usher (default)',
+      model: r && r.ok ? await r.json().catch(() => null) : 'no /health on this host',
+    })
   }
 
   if (p.startsWith('/api/room/')) {
