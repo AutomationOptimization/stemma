@@ -35,6 +35,15 @@ const LADDER_INDEX = (() => {
   return m
 })()
 
+// Words that routinely open a sentence and are not names. STOP already covers the
+// pronouns, articles and wh-words; these are the adverbs and time words it misses, which
+// is what used to make "Yesterday she left" report a lost name.
+const COMMON_OPENERS = new Set(('yesterday today tomorrow now later afterwards apparently ' +
+  'everyone someone somebody nobody everybody people last next during once since meanwhile ' +
+  'suddenly actually honestly basically anyway however though unfortunately luckily eventually ' +
+  'earlier tonight soon still already even really maybe perhaps probably supposedly turns ' +
+  'according one two three four five six seven eight nine ten first second third').split(' '))
+
 const NEGATORS = new Set(['not', "n't", 'no', 'never', 'none', 'nobody', 'nothing', 'nowhere',
   'neither', 'nor', 'cannot', 'cant', 'wont', 'didnt', 'doesnt', 'isnt', 'wasnt', 'arent', 'werent',
   'shouldnt', 'wouldnt', 'couldnt', 'hardly', 'barely', 'scarcely', 'without'])
@@ -158,22 +167,26 @@ function numbersIn(text) {
   return out
 }
 function properNouns(text) {
+  const s = String(text || '')
+  const re = /[A-Za-z][A-Za-z'’-]*/g
+  const found = []
+  let m
+  while ((m = re.exec(s))) {
+    // Opens a sentence if only quotes/brackets and whitespace separate it from the start
+    // of the text or a terminal mark. Every sentence opener is ambiguous, not just the first.
+    const opener = /(?:^|[.!?…])["'”’)\]]?\s*$/.test(s.slice(0, m.index))
+    found.push({ w: m[0], opener })
+  }
+  const cap = w => /^[A-Z]/.test(w) && w.length > 1 && !STOP.has(w.toLowerCase())
+  // A capitalized word mid-sentence is a name. At a sentence opening it is ambiguous, so
+  // keep it only if it also appears capitalized mid-sentence, or is not a word people
+  // routinely open sentences with.
+  const midCap = new Set(found.filter(f => !f.opener && cap(f.w)).map(f => f.w))
   const out = new Set()
-  const words = String(text || '').match(/[A-Za-z][A-Za-z'’-]+/g) || []
-  const sentStarts = new Set()
-  let idx = 0
-  String(text || '').split(/(?<=[.!?])\s+/).forEach(s => {
-    const w = (s.match(/[A-Za-z][A-Za-z'-]+/) || [])[0]
-    if (w) sentStarts.add(w)
-    idx++
-  })
-  words.forEach((w, k) => {
-    if (/^[A-Z]/.test(w) && w.length > 1) {
-      // A capitalized word that also opens a sentence is ambiguous; keep it only if it
-      // recurs mid-sentence somewhere, which real names usually do.
-      if (k === 0 && sentStarts.has(w)) return
-      if (!STOP.has(w.toLowerCase())) out.add(w)
-    }
+  found.forEach(f => {
+    if (!cap(f.w)) return
+    if (f.opener && !midCap.has(f.w) && COMMON_OPENERS.has(f.w.toLowerCase())) return
+    out.add(f.w)
   })
   return out
 }
@@ -224,14 +237,22 @@ export function analyzeHop(prev, next, original) {
   const lenRatio = pa.length ? pb.length / pa.length : 1
   const nA = numbersIn(prev), nB = numbersIn(next)
   const numChanged = []
-  const bVals = nB.map(x => x.val)
-  nA.forEach(x => { if (!bVals.includes(x.val)) {
-    const near = nB.find(y => !nA.some(z => z.val === y.val))
-    numChanged.push({ from: x.tok, to: near ? near.tok : null })
-  } })
-  nB.forEach(y => { if (!nA.some(x => x.val === y.val) && !numChanged.some(c => c.to === y.tok)) {
-    numChanged.push({ from: null, to: y.tok })
-  } })
+  // Match surviving values first, then pair the leftovers one-to-one. Consuming each
+  // replacement matters: two vanished numbers must not both claim the same new one.
+  const usedB = nB.map(() => false)
+  const leftA = []
+  nA.forEach(x => {
+    const j = nB.findIndex((y, k) => !usedB[k] && y.val === x.val)
+    if (j >= 0) usedB[j] = true
+    else leftA.push(x)
+  })
+  const leftB = nB.filter((_, k) => !usedB[k])
+  let bi = 0
+  leftA.forEach(x => {
+    const to = bi < leftB.length ? leftB[bi++] : null
+    numChanged.push({ from: x.tok, to: to ? to.tok : null })
+  })
+  for (; bi < leftB.length; bi++) numChanged.push({ from: null, to: leftB[bi].tok })
 
   const propA = properNouns(prev), propB = properNouns(next)
   const namesLost = [...propA].filter(w => !propB.has(w))
@@ -278,6 +299,55 @@ export function analyzeHop(prev, next, original) {
   }
 }
 
+// ---- chain breaks -----------------------------------------------------------
+// One person going off-script poisons every measurement downstream: the end-to-end
+// fidelity and every ribbon in the flow diagram are then scored against a message that
+// stopped being relevant several hops ago. We do not prevent it — a snapped chain is a
+// real result — but we name it and re-baseline around it.
+
+const BREAK_FIDELITY = 25   // below this the hop bears no recognizable relation to its input
+const BREAK_SEVERITY = 55   // an outlier must also be severe in absolute terms
+
+function median(xs) {
+  const s = [...xs].sort((a, b) => a - b)
+  if (!s.length) return 0
+  const m = s.length >> 1
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
+
+export function findBreaks(hops) {
+  if (!hops.length) return []
+  const sev = hops.map(h => h.severity)
+  const med = median(sev)
+  // MAD rather than standard deviation: with one wild hop in a chain of five, σ is
+  // inflated by the very outlier we are trying to isolate, and the test stops firing.
+  const mad = median(sev.map(v => Math.abs(v - med))) * 1.4826
+  return hops
+    .filter(h => h.fidelity <= BREAK_FIDELITY ||
+      (hops.length >= 3 && mad > 0 && h.severity >= med + 3 * mad && h.severity >= BREAK_SEVERITY))
+    .map(h => ({
+      index: h.index, author: h.to.author, severity: h.severity, fidelity: h.fidelity,
+      reason: h.fidelity <= BREAK_FIDELITY ? 'unrecognizable' : 'outlier',
+    }))
+}
+
+// Fidelity measured within each unbroken run, so one snapped link stops flattening the
+// whole report. Hop i carries texts[i-1] -> texts[i], so a break at i ends the run at
+// i-1 and starts the next at i.
+export function segmentsOf(texts, breaks) {
+  const cuts = new Set(breaks.map(b => b.index))
+  const spans = []
+  let start = 0
+  for (let i = 1; i < texts.length; i++) {
+    if (cuts.has(i)) {
+      if (i - 1 > start) spans.push({ from: start, to: i - 1 })
+      start = i
+    }
+  }
+  if (texts.length - 1 > start) spans.push({ from: start, to: texts.length - 1 })
+  return spans.map(s => ({ ...s, hops: s.to - s.from, fidelity: similarity(texts[s.from], texts[s.to]).fidelity }))
+}
+
 // Whole-chain rollup: per-hop drift plus the decay curve of each version against the original.
 export function analyzeChain(versions) {
   const texts = versions.map(v => v.text)
@@ -286,7 +356,24 @@ export function analyzeChain(versions) {
   for (let i = 1; i < texts.length; i++) {
     hops.push({ index: i, from: versions[i - 1], to: versions[i], ...analyzeHop(texts[i - 1], texts[i], original) })
   }
-  const curve = texts.map((t, i) => ({ index: i, fidelity: i === 0 ? 100 : similarity(original, t).fidelity }))
+  const breaks = findBreaks(hops)
+  const segments = segmentsOf(texts, breaks)
+  // Everything after the last break is measuring a different message. Downstream ribbons
+  // and the "still intact" number are scored against this text as well as the original.
+  const rebaseFrom = breaks.length ? breaks[breaks.length - 1].index : 0
+
+  const segStart = i => {
+    let s = 0
+    for (const b of breaks) if (b.index <= i) s = b.index
+    return s
+  }
+  const curve = texts.map((t, i) => ({
+    index: i,
+    fidelity: i === 0 ? 100 : similarity(original, t).fidelity,
+    // Fidelity against the head of this hop's own run — flat where the chain held, even
+    // when the against-original line has already collapsed.
+    segFidelity: i === segStart(i) ? 100 : similarity(texts[segStart(i)], t).fidelity,
+  }))
   const final = texts[texts.length - 1] ?? ''
   const endToEnd = similarity(original, final)
 
@@ -296,15 +383,27 @@ export function analyzeChain(versions) {
   const lost = [...new Set(co)].filter(w => !sf.has(canon(w)))
   const invented = [...new Set(cf)].filter(w => !so.has(canon(w)))
 
-  const biggest = hops.length ? hops.reduce((a, b) => (b.severity > a.severity ? b : a)) : null
+  // The biggest *distortion*, which is not the same as the biggest change. A break is
+  // already named on its own, and it would otherwise win this every time and bury the
+  // largest thing memory actually did to the message.
+  const broke = new Set(breaks.map(b => b.index))
+  const candidates = hops.filter(h => !broke.has(h.index))
+  const pool = candidates.length ? candidates : hops
+  const biggest = pool.length ? pool.reduce((a, b) => (b.severity > a.severity ? b : a)) : null
   const totals = { leveling: 0, sharpening: 0, assimilation: 0, invention: 0 }
   hops.forEach(h => h.ops.forEach(o => { totals[o.type] = (totals[o.type] || 0) + o.weight }))
 
   return {
-    hops, curve, survived, lost, invented, totals,
+    hops, curve, survived, lost, invented, totals, breaks, segments, rebaseFrom,
     fidelity: endToEnd.fidelity,
-    biggestMutation: biggest && { index: biggest.index, author: biggest.to.author, severity: biggest.severity,
-      headline: biggest.ops[0]?.label || 'rewrote it wholesale' },
+    // What survived the stretch after the last break. Equals `fidelity` on an unbroken chain.
+    fidelityRebased: similarity(texts[rebaseFrom] ?? '', final).fidelity,
+    biggestMutation: biggest && {
+      index: biggest.index, author: biggest.to.author, severity: biggest.severity,
+      headline: biggest.ops[0]?.label || 'rewrote it wholesale',
+      // A break is not a memory distortion, so there is nothing for abduction to explain.
+      isBreak: broke.has(biggest.index),
+    },
     finalDiff: diffWords(original, final),
   }
 }

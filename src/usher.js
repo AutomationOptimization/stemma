@@ -52,6 +52,17 @@ export async function ushChat(env, messages, { maxTokens = 700, temperature = 0.
   return null
 }
 
+// Bounded concurrency. The container serves 8 at a time, so firing a 9-player chain at it
+// all at once puts the last call behind the retry backoff of the other eight.
+export async function mapPool(items, limit, fn) {
+  const out = new Array(items.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i) }
+  }))
+  return out
+}
+
 // The 7B is quantized and will sometimes fence its JSON or chat before it. Never trust it.
 export function looseJson(raw) {
   if (!raw || typeof raw !== 'string') return null
