@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
     devDependencies:
       wrangler:
         specifier: ^4.128.0
